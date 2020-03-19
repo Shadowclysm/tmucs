@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+
+
+
+result = ""
+
+def checksum(layout):
+    csum=0
+    for i in range(len(layout)):
+        csum = (csum >> 1) + ((csum & 1) << 0xF)
+        csum += ord(layout[i])
+
+    return hex(csum & 0xFFFF)[2:]
+
+
+def make_layout(data):
+    if len(data) < 1 or len(data[0]) < 1: return
+    #TODO compare lenth of each element in data
+
+    xScale = int(subprocess.run(["tmux", "list-sessions", "-F", "#{window_width}"], stdout=subprocess.PIPE, encoding="UTF-8").stdout.strip('\n')) / len(data[0])
+    yScale = int(subprocess.run(["tmux", "list-sessions", "-F", "#{window_height}"], stdout=subprocess.PIPE, encoding="UTF-8").stdout.strip('\n')) / len(data)
+
+    global result
+    result = ""
+
+    pane = {
+        "width":xScale,
+        "height":yScale,
+        "count": 0,
+        "layout":""
+    }
+
+    splitData(data, 0, 0, len(data[0]), len(data), pane)
+    result = result.rstrip(',')
+
+    return checksum(result) + "," + result
+
+
+
+def splitData(data, x, y, width, height, pane, splitCount=0):
+
+    global result
+    if result.endswith("]") or result.endswith("}"):
+        result += ","
+    result += ("%ix%i,%i,%i," % (width*pane["width"], height*pane["height"], x, y))
+
+    if height > 1 :
+        yNew = y
+        for row in range(1, height) :
+            valid = True
+            for col in range(width) :
+                if data[y+row-1][x+col] == data[y+row][x+col]:
+                    valid = False
+                    break;
+
+            if valid: # split here
+                if splitCount == 0:
+                    result += "["
+                elif splitCount > 1:
+                    result += ","
+
+                splitData(data, x, yNew, width, row-yNew, pane) # x and width doesn't change
+                splitCount += 1
+                yNew = row
+
+        if splitCount > 0: # split last
+            splitData(data, x, yNew, width, height-yNew, pane) # x and width doesn't change
+            result = result.rstrip(",") + "]" # remove the trailing comma
+
+
+    if width > 1 and splitCount == 0:
+        xNew = x
+        for col in range(1, width) :
+            valid = True
+            for row in range(height) :
+                if data[y+row][x+col-1] == data[y+row][x+col]:
+                    valid = False
+                    break
+
+            if valid: # split here
+                if splitCount == 0:
+                    result += "{"
+                elif splitCount > 1:
+                    result += ","
+
+                splitData(data, xNew, y, col-xNew, height, pane) # y and height doesn't change
+                splitCount += 1
+                xNew = col
+
+        if splitCount > 0: # split last
+            splitData(data, xNew, y, width-xNew, height, pane) # y and height doesn't change
+            result = result.rstrip(",") + "}" # remove the trailing comma
+
+
+    if splitCount == 0:
+        result += str(pane["count"]) + ","
+        pane["count"] += 1
+
+def hasSession(args):
+    sp = subprocess.run(("tmux has-session -t %s:" % args.session).split())
+    if sp.returncode:
+        print(sp.stdout)
+        return False
+    return True
+
+
+
+def makeWindow(session, window, force=False):
+    # -d, do not switch to new window
+    # TODO -c, default dir
+    command = ("tmux new-window -t %s:%s -n %s -d %s"%(session, window["number"], window["name"], "-k" if force else "")).split()
+    # TODO implement with sendkey
+    #if type(window["panes"]) is list:
+    #    command.append(window["panes"][0])
+
+    subprocess.run(command)
+
+
+
+
+    # resize hook
+    subprocess.run(["tmux", "set-hook", "after-split-window", "select-layout tiled"])
+
+    #split = (type(window["panes"]) is list)? len(window["panes"]) : panes
+    if type(window["panes"]) is list:
+        split = len(window["panes"])
+    else:
+        split = window["panes"]
+
+    # TODO default dir
+    # split each pane from first
+    for pane in range(1, split):
+        subprocess.run(("tmux split-window -t %s:%s -d"%(session, window["number"])).split())
+
+    # unhook
+    subprocess.run("tmux set-hook -u after-split-window".split())
+
+
+    # set layout
+    subprocess.run(("tmux select-layout -t %s:%s %s"%(session, window["number"], make_layout(window["layout"]))).split())
+
+
+
+def main():
+    parser = argparse.ArgumentParser(epilog="Use TMUX_TMPDIR to configure the socket file path\n")
+    parser.add_argument("-s", "--session", help="specify session, default to [0]", default='0', metavar='')
+    parser.add_argument("-w", "--window", help="specify window number, default to all windows", metavar='', type=int)
+    parser.add_argument("-f", "--force", help="close existing window on conflict", action='store_true')
+    #parser.add_argument("-l", "--layout", metavar='\b', help="specify tmug layout, default to ~/.tmux/{SESSION}.json, window specific")
+    # -f --force close existing windows
+    args = parser.parse_args()
+
+    # verify session
+    if not hasSession(args):
+        system.exit(1)
+
+    # verify session config
+    session_data = json.load(open(pathlib.Path.home().joinpath(".tmux/%s.json" % args.session)))
+
+    # verify window
+    if args.window:
+        for w in [window for window in session_data["windows"] if window["number"] == args.window]:
+            makeWindow(args.session, w)
+    else:
+        for window in session_data["windows"]:
+            makeWindow(args.session, window)
+
+
+if __name__ == "__main__":
+    main()
